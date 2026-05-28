@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/telemetry"
 	"github.com/urfave/cli/v2"
 )
 
@@ -94,6 +96,11 @@ func updateBuildInfo() {
 
 func main() {
 	updateBuildInfo()
+
+	shutdownTelemetry, telErr := telemetry.Setup(context.Background(), "soundtouch-cli")
+	if telErr != nil {
+		log.Printf("telemetry setup failed: %v", telErr)
+	}
 
 	app := &cli.App{
 		Name:  "soundtouch-cli",
@@ -2256,7 +2263,16 @@ func main() {
 		sortFlags(app.Flags)
 	}
 
+	exitCode := 0
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		log.Printf("error: %v", err)
+		exitCode = 1
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if shutdownTelemetry != nil {
+		_ = shutdownTelemetry(shutdownCtx)
+	}
+	os.Exit(exitCode)
 }

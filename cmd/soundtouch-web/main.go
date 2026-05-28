@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb"
+	"github.com/gesellix/bose-soundtouch/pkg/telemetry"
 	"github.com/go-chi/chi/v5"
 	"github.com/urfave/cli/v2"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var (
@@ -48,6 +50,11 @@ func updateBuildInfo() {
 
 func main() {
 	updateBuildInfo()
+
+	shutdownTelemetry, telErr := telemetry.Setup(context.Background(), "soundtouch-web")
+	if telErr != nil {
+		log.Printf("telemetry setup failed: %v", telErr)
+	}
 
 	app := &cli.App{
 		Name:  "soundtouch-web",
@@ -129,6 +136,9 @@ func main() {
 			}()
 
 			r := chi.NewRouter()
+			r.Use(func(next http.Handler) http.Handler {
+				return otelhttp.NewMiddleware("soundtouch-web")(next)
+			})
 			webApp.Mount(r, discoveryService)
 
 			log.Printf("AfterTouch Web UI starting on http://%s", sanitizeLog(addr))
@@ -137,9 +147,18 @@ func main() {
 		},
 	}
 
+	exitCode := 0
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		log.Printf("error: %v", err)
+		exitCode = 1
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if shutdownTelemetry != nil {
+		_ = shutdownTelemetry(shutdownCtx)
+	}
+	os.Exit(exitCode)
 }
 
 // defaultDiscoveryInterface picks the interface name to use for mDNS/UPnP

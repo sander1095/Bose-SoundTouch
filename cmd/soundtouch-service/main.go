@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/discovery"
+	"github.com/gesellix/bose-soundtouch/pkg/telemetry"
 	"github.com/gesellix/bose-soundtouch/pkg/service/amazon"
 	"github.com/gesellix/bose-soundtouch/pkg/service/certmanager"
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
@@ -33,6 +34,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/urfave/cli/v2"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var (
@@ -201,6 +203,11 @@ func logBufferCapacityFromEnv(defaultCap int) int {
 
 func main() {
 	updateBuildInfo()
+
+	shutdownTelemetry, telErr := telemetry.Setup(context.Background(), "soundtouch-service")
+	if telErr != nil {
+		log.Printf("telemetry setup failed: %v", telErr)
+	}
 
 	// Mirror log output to an in-memory ring buffer so the admin
 	// UI can show a live trace. Stderr keeps receiving every line
@@ -557,9 +564,18 @@ func main() {
 		},
 	}
 
+	exitCode := 0
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		log.Printf("error: %v", err)
+		exitCode = 1
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if shutdownTelemetry != nil {
+		_ = shutdownTelemetry(shutdownCtx)
+	}
+	os.Exit(exitCode)
 }
 
 func showVersionInfo(_ *cli.Context) error {
@@ -960,6 +976,13 @@ func startDeviceDiscovery(server *handlers.Server) {
 
 func setupRouter(server *handlers.Server, stockholmHandler *stockholm.Handler) *chi.Mux {
 	r := chi.NewRouter()
+
+	// OpenTelemetry HTTP middleware: emit a span per incoming request so
+	// the Aspire dashboard can show distributed traces. Span name is the
+	// chi route pattern when the request reaches a registered handler.
+	r.Use(func(next http.Handler) http.Handler {
+		return otelhttp.NewMiddleware("soundtouch-service")(next)
+	})
 
 	// TrustedRealIP must run before any handler that reads r.RemoteAddr —
 	// SnapshotMiddleware captures the request, and several handlers
