@@ -7,6 +7,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -92,6 +93,11 @@ func Setup(ctx context.Context, fallbackService string) (Shutdown, error) {
 		sdklog.WithResource(res),
 	)
 	global.SetLoggerProvider(lp)
+
+	// Tee stdlib log output so every existing log.Printf also flows to OTel.
+	// Binaries that later override log.SetOutput should compose LogSink() in
+	// their own MultiWriter to keep the sink in the chain.
+	log.SetOutput(io.MultiWriter(log.Writer(), LogSink()))
 
 	log.Printf("otel: telemetry initialised for service=%s endpoint=%s", serviceName, endpoint)
 

@@ -214,11 +214,15 @@ func main() {
 	// verbatim — the buffer is a second sink, not a replacement.
 	// Installing this before the cli.Action runs means every
 	// log.Printf from initialisation onwards is captured.
+	//
+	// telemetry.Setup already routed log output through an OTel sink;
+	// keep that sink in the chain so the admin UI buffer doesn't drop
+	// log records from the dashboard.
 	var logBuf *logbuf.Buffer
 
 	if bufCap := logBufferCapacityFromEnv(2000); bufCap > 0 {
 		logBuf = logbuf.New(bufCap)
-		log.SetOutput(io.MultiWriter(os.Stderr, logBuf))
+		log.SetOutput(io.MultiWriter(os.Stderr, logBuf, telemetry.LogSink()))
 	}
 
 	app := &cli.App{
