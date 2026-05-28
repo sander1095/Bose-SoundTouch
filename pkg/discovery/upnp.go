@@ -16,6 +16,9 @@ import (
 
 	"github.com/gesellix/bose-soundtouch/pkg/config"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/ipv4"
 )
 
@@ -71,28 +74,55 @@ func NewServiceWithConfig(cfg *config.Config) *Service {
 
 // DiscoverDevices discovers all SoundTouch devices on the network
 func (d *Service) DiscoverDevices(ctx context.Context) ([]*models.DiscoveredDevice, error) {
+	// Mirror the unified service's instrumentation so the SSDP-only path
+	// (used by Server.DiscoverDevices in cmd/soundtouch-service) is also
+	// visible in the trace tree.
+	ctx, span := discoveryTracer.Start(ctx, "discovery.cycle",
+		trace.WithAttributes(
+			attribute.String("discovery.variant", "ssdp"),
+			attribute.Bool("discovery.upnp_enabled", d.config.UPnPEnabled),
+		))
+	start := time.Now()
+	defer func() {
+		discoveryDuration.Record(ctx, time.Since(start).Seconds())
+		span.End()
+	}()
+
 	// Check cache first
 	d.cleanupCache()
 
 	cached := d.getCachedDevices()
 	if len(cached) > 0 {
+		span.SetAttributes(
+			attribute.Bool("discovery.cache_hit", true),
+			attribute.Int("discovery.device_count", len(cached)),
+		)
 		return cached, nil
 	}
+	span.SetAttributes(attribute.Bool("discovery.cache_hit", false))
 
 	var allDevices []*models.DiscoveredDevice
 
 	// Add configured devices first
 	configuredDevices := d.getConfiguredDevices()
 	allDevices = append(allDevices, configuredDevices...)
+	if n := len(configuredDevices); n > 0 {
+		discoveryFoundCtr.Add(ctx, int64(n),
+			metric.WithAttributes(attribute.String("source", "configured")))
+	}
 
 	// Perform UPnP discovery if enabled
 	if d.config.UPnPEnabled {
 		upnpDevices, err := d.PerformDiscovery(ctx)
 		if err != nil {
+			discoveryErrorsCtr.Add(ctx, 1,
+				metric.WithAttributes(attribute.String("source", "ssdp")))
 			log.Printf("UPnP: Discovery failed: %v", err)
 			// Don't fail completely if UPnP fails, just log and continue with configured devices
 			// We'll just use configured devices
 		} else {
+			discoveryFoundCtr.Add(ctx, int64(len(upnpDevices)),
+				metric.WithAttributes(attribute.String("source", "ssdp")))
 			// Merge UPnP devices, avoiding duplicates
 			allDevices = d.mergeDevices(allDevices, upnpDevices)
 		}
@@ -101,6 +131,7 @@ func (d *Service) DiscoverDevices(ctx context.Context) ([]*models.DiscoveredDevi
 	// Update cache
 	d.updateCache(allDevices)
 
+	span.SetAttributes(attribute.Int("discovery.device_count", len(allDevices)))
 	return allDevices, nil
 }
 

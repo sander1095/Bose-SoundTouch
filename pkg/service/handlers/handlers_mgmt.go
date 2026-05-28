@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,7 +177,7 @@ func (s *Server) HandleMgmtSpotifyCallback(w http.ResponseWriter, r *http.Reques
 		accountID = r.URL.Query().Get("state")
 	}
 
-	s.bridgeSpotifyToMarge(accountID)
+	s.bridgeSpotifyToMarge(r.Context(), accountID)
 
 	w.Header().Set("Content-Type", "text/html")
 	_, _ = w.Write([]byte(`<html><body><h1>Spotify Connected</h1><p>You can close this window.</p></body></html>`))
@@ -214,14 +215,14 @@ func (s *Server) HandleMgmtSpotifyConfirm(w http.ResponseWriter, r *http.Request
 		accountID = r.URL.Query().Get("state")
 	}
 
-	s.bridgeSpotifyToMarge(accountID)
+	s.bridgeSpotifyToMarge(r.Context(), accountID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func (s *Server) bridgeSpotifyToMarge(accountID string) {
+func (s *Server) bridgeSpotifyToMarge(ctx context.Context, accountID string) {
 	if accountID == "" {
 		accountID = "default"
 	}
@@ -275,10 +276,15 @@ func (s *Server) bridgeSpotifyToMarge(accountID string) {
 				continue
 			}
 
+			// Detach cancellation from the request (the response writes
+			// well before this fan-out completes) but keep the trace
+			// context so the speaker calls are children of the request.
+			callerCtx := context.WithoutCancel(ctx)
+
 			go func(d models.ServiceDeviceInfo) {
 				log.Printf("[Spotify Bridge] Notifying speaker %s (%s) about new Spotify account", sanitizeLog(d.Name), sanitizeLog(d.IPAddress))
 
-				c := client.NewClientFromHost(d.IPAddress)
+				c := client.NewClientFromHost(d.IPAddress).WithContext(callerCtx)
 				creds := models.NewSpotifyOAuthCredentials(acc.UserID, credential, acc.DisplayName)
 
 				if err := c.SetMusicServiceOAuthAccount(creds); err != nil {
@@ -520,7 +526,7 @@ func (s *Server) HandleMgmtAmazonCallback(w http.ResponseWriter, r *http.Request
 		accountID = r.URL.Query().Get("state")
 	}
 
-	s.bridgeAmazonToMarge(accountID)
+	s.bridgeAmazonToMarge(r.Context(), accountID)
 
 	w.Header().Set("Content-Type", "text/html")
 	_, _ = w.Write([]byte(`<html><body><h1>Amazon Music Connected</h1><p>You can close this window.</p></body></html>`))
@@ -557,14 +563,14 @@ func (s *Server) HandleMgmtAmazonConfirm(w http.ResponseWriter, r *http.Request)
 		accountID = r.URL.Query().Get("state")
 	}
 
-	s.bridgeAmazonToMarge(accountID)
+	s.bridgeAmazonToMarge(r.Context(), accountID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func (s *Server) bridgeAmazonToMarge(accountID string) {
+func (s *Server) bridgeAmazonToMarge(ctx context.Context, accountID string) {
 	if accountID == "" {
 		accountID = "default"
 	}
@@ -621,13 +627,16 @@ func (s *Server) bridgeAmazonToMarge(accountID string) {
 				continue
 			}
 
+			// See Spotify bridge above for the WithoutCancel rationale.
+			callerCtx := context.WithoutCancel(ctx)
+
 			go func(d models.ServiceDeviceInfo) {
 				log.Printf("[Amazon Bridge] Notifying speaker %s (%s) about new Amazon account", sanitizeLog(d.Name), sanitizeLog(d.IPAddress))
 
 				cfg := client.DefaultConfig()
 				cfg.Host = d.IPAddress
 				cfg.Timeout = 5 * time.Second
-				c := client.NewClient(cfg)
+				c := client.NewClient(cfg).WithContext(callerCtx)
 				creds := models.NewAmazonOAuthCredentials(acc.Email, string(credJSON), acc.DisplayName)
 
 				if err := c.SetMusicServiceOAuthAccount(creds); err != nil {

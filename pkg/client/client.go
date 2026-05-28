@@ -143,6 +143,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -175,6 +176,36 @@ type Client struct {
 	httpClient *http.Client
 	timeout    time.Duration
 	userAgent  string
+	// ctx is the context used when building outbound requests. It is
+	// optional — callers set it via WithContext to propagate request
+	// scope (deadlines, OTel trace context) into the 135 public
+	// methods without changing each one's signature.
+	ctx context.Context
+}
+
+// WithContext returns a shallow copy of the client whose outbound
+// requests use ctx. Public methods (GetDeviceInfo, Play, etc.) read it
+// internally — the API surface stays unchanged.
+//
+// Usage from an HTTP handler:
+//
+//	info, err := client.NewClientFromHost(ip).WithContext(r.Context()).GetDeviceInfo()
+//
+// Calling on the original client never mutates it; safe for concurrent
+// use across goroutines that each derive their own context.
+func (c *Client) WithContext(ctx context.Context) *Client {
+	cc := *c
+	cc.ctx = ctx
+	return &cc
+}
+
+// requestContext returns c.ctx when set, otherwise context.Background.
+// Internal helpers use this to build http.NewRequestWithContext requests.
+func (c *Client) requestContext() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
 }
 
 // Config holds configuration for the SoundTouch client
@@ -1104,7 +1135,7 @@ func (c *Client) Host() string {
 func (c *Client) get(endpoint string, result interface{}) error {
 	url := c.baseURL + endpoint
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(c.requestContext(), "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -1163,7 +1194,7 @@ func (c *Client) post(endpoint string, payload interface{}) error {
 		body = bytes.NewReader(xmlData)
 	}
 
-	req, err := http.NewRequest("POST", url, body)
+	req, err := http.NewRequestWithContext(c.requestContext(), "POST", url, body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -1220,7 +1251,7 @@ func (c *Client) postWithResponse(endpoint string, payload, result interface{}) 
 		body = bytes.NewReader(xmlData)
 	}
 
-	req, err := http.NewRequest("POST", url, body)
+	req, err := http.NewRequestWithContext(c.requestContext(), "POST", url, body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}

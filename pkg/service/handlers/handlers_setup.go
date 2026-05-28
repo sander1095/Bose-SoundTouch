@@ -81,9 +81,11 @@ func (s *Server) HandleAddManualDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleTriggerDiscovery triggers a new device discovery scan.
-func (s *Server) HandleTriggerDiscovery(w http.ResponseWriter, _ *http.Request) {
-	//nolint:contextcheck
-	go s.DiscoverDevices(context.Background())
+func (s *Server) HandleTriggerDiscovery(w http.ResponseWriter, r *http.Request) {
+	// Preserve trace context so the discovery span becomes a child of
+	// this request, but drop cancellation — discovery outlives the
+	// response writer.
+	go s.DiscoverDevices(context.WithoutCancel(r.Context()))
 
 	w.WriteHeader(http.StatusAccepted)
 }
