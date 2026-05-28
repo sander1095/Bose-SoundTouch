@@ -288,9 +288,12 @@ func TestClientTimeout(t *testing.T) {
 		t.Error("Expected timeout error, got nil")
 	}
 
-	expectedError := "deadline exceeded"
-	if !contains(err.Error(), expectedError) {
-		t.Errorf("Expected error to contain '%s', got '%s'", expectedError, err.Error())
+	// Go's net/http surfaces a Client.Timeout in two different phrases
+	// depending on which phase (headers vs context) trips first. Both are
+	// legitimate timeout signals.
+	msg := err.Error()
+	if !contains(msg, "deadline exceeded") && !contains(msg, "Client.Timeout exceeded") {
+		t.Errorf("Expected timeout error, got '%s'", msg)
 	}
 }
 

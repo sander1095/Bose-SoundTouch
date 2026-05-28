@@ -419,6 +419,16 @@ func main() {
 			config := loadConfig(c)
 			ds := initDataStore(config.dataDir)
 
+			if err := telemetry.RegisterDeviceCountGauge(
+				"soundtouch.devices.known",
+				func(context.Context) (int64, error) {
+					devices, listErr := ds.ListAllDevices()
+					return int64(len(devices)), listErr
+				},
+			); err != nil {
+				log.Printf("telemetry: device count gauge registration failed: %v", err)
+			}
+
 			persisted := applyPersistedSettings(ds, &config)
 
 			if persisted.ServerURL == "" {

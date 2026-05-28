@@ -116,7 +116,40 @@ import (
 
 	"github.com/gesellix/bose-soundtouch/pkg/config"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// discovery telemetry — package-level so we register histograms once and
+// reuse them across every DiscoverDevices call. Tracer/Meter resolve at first
+// use against whatever providers the binary has set globally, so the no-op
+// providers stay no-ops when telemetry is disabled.
+var (
+	discoveryTracer    = otel.Tracer("github.com/gesellix/bose-soundtouch/pkg/discovery")
+	discoveryMeter     = otel.Meter("github.com/gesellix/bose-soundtouch/pkg/discovery")
+	discoveryDuration  metric.Float64Histogram
+	discoveryFoundCtr  metric.Int64Counter
+	discoveryErrorsCtr metric.Int64Counter
+)
+
+func init() {
+	discoveryDuration, _ = discoveryMeter.Float64Histogram(
+		"soundtouch.discovery.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of a unified discovery cycle (mDNS + SSDP)."),
+	)
+	discoveryFoundCtr, _ = discoveryMeter.Int64Counter(
+		"soundtouch.discovery.devices_found",
+		metric.WithDescription("Devices returned by a discovery cycle, by source."),
+	)
+	discoveryErrorsCtr, _ = discoveryMeter.Int64Counter(
+		"soundtouch.discovery.errors",
+		metric.WithDescription("Discovery errors by source (mdns, ssdp)."),
+	)
+}
 
 // UnifiedDiscoveryService combines SSDP and mDNS discovery methods
 type UnifiedDiscoveryService struct {
@@ -152,13 +185,29 @@ func NewUnifiedDiscoveryService(cfg *config.Config) *UnifiedDiscoveryService {
 
 // DiscoverDevices discovers SoundTouch devices using both SSDP and mDNS
 func (u *UnifiedDiscoveryService) DiscoverDevices(ctx context.Context) ([]*models.DiscoveredDevice, error) {
+	ctx, span := discoveryTracer.Start(ctx, "discovery.cycle",
+		trace.WithAttributes(
+			attribute.Bool("discovery.upnp_enabled", u.config.UPnPEnabled),
+			attribute.Bool("discovery.mdns_enabled", u.config.MDNSEnabled),
+		))
+	start := time.Now()
+	defer func() {
+		discoveryDuration.Record(ctx, time.Since(start).Seconds())
+		span.End()
+	}()
+
 	// Check cache first
 	u.cleanupCache()
 
 	cached := u.getCachedDevices()
 	if len(cached) > 0 && u.config.CacheEnabled {
+		span.SetAttributes(
+			attribute.Bool("discovery.cache_hit", true),
+			attribute.Int("discovery.device_count", len(cached)),
+		)
 		return cached, nil
 	}
+	span.SetAttributes(attribute.Bool("discovery.cache_hit", false))
 
 	// Initialize devices slice to ensure it's never nil
 	allDevices := make([]*models.DiscoveredDevice, 0)
@@ -166,6 +215,10 @@ func (u *UnifiedDiscoveryService) DiscoverDevices(ctx context.Context) ([]*model
 	// Add configured devices first
 	configuredDevices := u.getConfiguredDevices()
 	allDevices = append(allDevices, configuredDevices...)
+	if n := len(configuredDevices); n > 0 {
+		discoveryFoundCtr.Add(ctx, int64(n),
+			metric.WithAttributes(attribute.String("source", "configured")))
+	}
 
 	// Use channels to collect results from both discovery methods
 	ssdpChan := make(chan []*models.DiscoveredDevice, 1)
@@ -185,6 +238,8 @@ func (u *UnifiedDiscoveryService) DiscoverDevices(ctx context.Context) ([]*model
 			if err == nil {
 				ssdpChan <- devices
 			} else {
+				discoveryErrorsCtr.Add(ctx, 1,
+					metric.WithAttributes(attribute.String("source", "ssdp")))
 				ssdpChan <- nil
 			}
 		}()
@@ -203,6 +258,8 @@ func (u *UnifiedDiscoveryService) DiscoverDevices(ctx context.Context) ([]*model
 			if err == nil {
 				mdnsChan <- devices
 			} else {
+				discoveryErrorsCtr.Add(ctx, 1,
+					metric.WithAttributes(attribute.String("source", "mdns")))
 				mdnsChan <- nil
 			}
 		}()
@@ -215,11 +272,20 @@ func (u *UnifiedDiscoveryService) DiscoverDevices(ctx context.Context) ([]*model
 
 	// Collect results from both methods
 	if ssdpDevices := <-ssdpChan; ssdpDevices != nil {
+		discoveryFoundCtr.Add(ctx, int64(len(ssdpDevices)),
+			metric.WithAttributes(attribute.String("source", "ssdp")))
 		allDevices = u.mergeDevices(allDevices, ssdpDevices)
 	}
 
 	if mdnsDevices := <-mdnsChan; mdnsDevices != nil {
+		discoveryFoundCtr.Add(ctx, int64(len(mdnsDevices)),
+			metric.WithAttributes(attribute.String("source", "mdns")))
 		allDevices = u.mergeDevices(allDevices, mdnsDevices)
+	}
+
+	span.SetAttributes(attribute.Int("discovery.device_count", len(allDevices)))
+	if len(allDevices) == 0 {
+		span.SetStatus(codes.Ok, "no devices")
 	}
 
 	// Update cache

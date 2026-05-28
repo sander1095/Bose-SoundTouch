@@ -154,7 +154,20 @@ import (
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/speaker"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+// instrumentedTransport wraps the default RoundTripper with OpenTelemetry so
+// every outbound call to a real SoundTouch speaker emits a span and feeds the
+// standard `http.client.request.duration` histogram. Spans are named after
+// the URL host so per-speaker behaviour stays distinguishable.
+func instrumentedTransport() http.RoundTripper {
+	return otelhttp.NewTransport(http.DefaultTransport,
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Host
+		}),
+	)
+}
 
 // Client represents a SoundTouch API client
 type Client struct {
@@ -208,7 +221,8 @@ func NewClient(config *Config) *Client {
 		return &Client{
 			baseURL: fmt.Sprintf("http://%s:%d", config.Host, port),
 			httpClient: &http.Client{
-				Timeout: config.Timeout,
+				Timeout:   config.Timeout,
+				Transport: instrumentedTransport(),
 			},
 			timeout:   config.Timeout,
 			userAgent: config.UserAgent,
@@ -238,7 +252,8 @@ func NewClient(config *Config) *Client {
 	return &Client{
 		baseURL: u.String(),
 		httpClient: &http.Client{
-			Timeout: config.Timeout,
+			Timeout:   config.Timeout,
+			Transport: instrumentedTransport(),
 		},
 		timeout:   config.Timeout,
 		userAgent: config.UserAgent,
