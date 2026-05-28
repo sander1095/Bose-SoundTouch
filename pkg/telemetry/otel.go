@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"time"
 
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -94,9 +96,20 @@ func Setup(ctx context.Context, fallbackService string) (Shutdown, error) {
 	)
 	global.SetLoggerProvider(lp)
 
+	// Install otelslog as the default slog handler. Code that calls
+	// slog.InfoContext(ctx, …) / slog.ErrorContext(ctx, …) now gets
+	// trace_id and span_id attached to every record — the ASP.NET-Core
+	// "logs share their request's trace" experience for the slog API.
+	// Non-context slog calls still ship records, just without correlation.
+	slog.SetDefault(slog.New(otelslog.NewHandler(serviceName,
+		otelslog.WithLoggerProvider(lp),
+	)))
+
 	// Tee stdlib log output so every existing log.Printf also flows to OTel.
-	// Binaries that later override log.SetOutput should compose LogSink() in
-	// their own MultiWriter to keep the sink in the chain.
+	// Stdlib `log` has no context plumbing, so these records arrive without
+	// trace_id — switch hot-path call sites to slog.InfoContext to get
+	// correlation. Binaries that later override log.SetOutput should compose
+	// LogSink() in their own MultiWriter to keep the sink in the chain.
 	log.SetOutput(io.MultiWriter(log.Writer(), LogSink()))
 
 	log.Printf("otel: telemetry initialised for service=%s endpoint=%s", serviceName, endpoint)

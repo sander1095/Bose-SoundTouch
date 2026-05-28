@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -82,6 +83,12 @@ func (s *Server) HandleAddManualDevice(w http.ResponseWriter, r *http.Request) {
 
 // HandleTriggerDiscovery triggers a new device discovery scan.
 func (s *Server) HandleTriggerDiscovery(w http.ResponseWriter, r *http.Request) {
+	// slog.InfoContext picks up trace_id/span_id from the request context
+	// via the otelslog handler installed in telemetry.Setup — this is the
+	// pattern new code should follow for log/trace correlation.
+	slog.InfoContext(r.Context(), "manual discovery scan triggered",
+		"remote_addr", r.RemoteAddr)
+
 	// Preserve trace context so the discovery span becomes a child of
 	// this request, but drop cancellation — discovery outlives the
 	// response writer.
